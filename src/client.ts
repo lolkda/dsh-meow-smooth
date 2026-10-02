@@ -3,19 +3,6 @@
  *
  * 前端行为增强（纯插件，不改 dsh 本体）：
  *
- * 1. 输入框失焦折叠：composer 输入区（旧版是 textarea，dsh 0.1.5 起是 Lexical
- *    contenteditable——"事件/焦点是否落在输入区"的判定统一走 composerEditableOf）
- *    失去焦点时，按端收窄——
- *    桌面折叠回 2 行、窄屏/手机折叠回 1 行（手机屏幕小，1 行留给内容）；
- *    再次聚焦/点击时展开回草稿实际高度（滚动位置保留）。
- *    机制：输入框高度 = mirror 撑高 + [data-input-scroll] 滚动窗
- *    （CSS max-height 14 行上限，见 InputBar.module.css .scroll）。折叠 =
- *    插件 CSS 把滚动窗 max-height 压到目标行数，不动
- *    mirror/backdrop/textarea 三层结构；document
- *    级 focusin/focusout 事件委托判定进出卡片（[data-composer-card]），
- *    pointerdown 兜底：点卡片任意处即展开（非交互区域顺带聚焦 textarea），
- *    scrollTop 存 WeakMap 展开时恢复（防视口错位）。
- *
  * 2. composer 按钮行单行排布（2026-09-02 折叠屏，猫猫拍板）：.row 永不
  *    换行（官方 flex-wrap:wrap 会让 trailing 整组掉到第二行）——trailing
  *    放开收缩，宽度不足时模型名 label 先缩（官方 ellipsis）；极窄
@@ -25,10 +12,7 @@
  *    user-scalable=no、CSS touch-action: manipulation（防双击缩放）、
  *    iOS gesture 事件拦截（防捏合）。
  *
- * 4. 手机端输入框换行：粗指针（触屏）设备上 Enter 不再发送——capture
- *    阶段只 stopPropagation 断掉官方 keydown→submit 路径，默认行为留给
- *    浏览器原生插入换行（v5.3 重写：旧版手动改 DOM+合成事件与受控层
- *    竞争，造成换行丢失/跳回）；Shift/修饰键与 IME 选词不受影响。
+ * 4. 输入栏 Enter 与键盘提示由宿主处理，本插件不再拦截或覆盖。
  *
  * 5. 窄屏选中会话自动收起侧边栏：视口宽度 < 1024px（dsh 布局契约
  *    SIDEBAR_AUTO_COLLAPSE）时，切换 Session 后自动把侧边栏收成 rail。
@@ -69,13 +53,6 @@
  *     样式的圆角卡片（v2：两行文字、下滑弹出、整卡点击进入、上滑隐藏、
  *     30s 静默防重弹）：官方面板接管则隐藏；跳转失败/面板未接管（iOS
  *     实例重建限制）→ 卡片 fail 提示与恢复办法。纯通知，不做输入。
- *
- * 13. 折叠稳定性修复：折叠判定对比实测 N 行高（line-height × N + padding）
- *     而非滚动窗当前高度——旧逻辑把"无溢出"误判为"只有 1 行"，导致
- *     多行草稿（≤14 行内）永不折叠；折叠高度用 JS 实测写入 CSS 变量
- *     --meow-smooth-fold-height（按 foldLines() 的目标行数实测），任何主题
- *     都精确等于目标行数高（桌面 2 行 / 窄屏 1 行，跨断点 resize 重算）；
- *     触屏点卡片外 click 兜底折叠（iOS/Android 点空白可能不移焦）。
  *
  * 14. 手机端禁用橡皮筋回弹：overscroll-behavior:none（html/body 与
  *     [data-slot="root"] 全树）+ JS touchmove 边界兜底（旧 iOS/安卓）。
@@ -157,9 +134,10 @@ import { useEffect, useRef } from 'react'
 import { installBackGuard } from './back-guard.ts'
 import { installNotifyClient, type NotifyItem } from './notify-client.ts'
 import { installSettingsMobile } from './settings-mobile.ts'
+import { installSidebarMobile } from './sidebar-mobile.ts'
+import { installMobileHeader } from './header-mobile.ts'
+import { installTitleSidebarEntry } from './title-sidebar-entry.ts'
 import { installSidebarGesture } from './sidebar-gesture.ts'
-import { createBusyEnterHook, RunSendButton, type RunSendMode } from './run-send.tsx'
-import { PhotoPickerButton } from './photo-picker.tsx'
 
 /** 官方类型的最小本地声明（构建零 @deepseek-ai 依赖）。
  *
@@ -174,10 +152,6 @@ interface ILayout {
   toggleSidebar(): void
 }
 
-/** 折叠状态属性（挂在 composer 卡片上）。 */
-const FOLD_ATTR = 'data-meow-smooth'
-/** 折叠态值。 */
-const FOLD_COLLAPSED = 'collapsed'
 /** 输入法激活标记（挂在 documentElement 上——不随会话 header 重挂丢失；
  *  CSS 据此隐藏原生 header，JS 据此显示/隐藏悬浮 Session name 条）。 */
 const IME_ROOT_ATTR = 'data-meow-smooth-ime'
@@ -187,16 +161,6 @@ const BAR_ATTR = 'data-meow-smooth-bar'
 /** 菜单打开标记（挂在 titleRow 上）：CSS 据此放开 overflow 防裁剪，
  *  JS 据此补偿 scrollLeft 保持原位不回跳。 */
 const HEADER_MENU_ATTR = 'data-meow-smooth-menu-open'
-/** 失焦折叠保留的行数：桌面 2 行（扫一眼上下文够接着写，又不占屏），
- *  窄屏 1 行（手机屏幕小，1 行留给内容）。按 foldLines() 的窄屏判定取值。 */
-const FOLD_LINES_DESKTOP = 2
-const FOLD_LINES_MOBILE = 1
-/** 折叠高度兜底（仅 JS 未实测时生效）：桌面 = 单行 24px line-height +
- *  6px padding（InputBar.module.css 契约）× 2 行；窄屏 = 1 行 30px。
- *  实际折叠高度由 JS 按 foldLines() 实测写入 --meow-smooth-fold-height
- *  变量（任何主题/字号都精确等于目标行数高）。 */
-const FOLDED_MAX_HEIGHT = '54px'
-const FOLDED_MAX_HEIGHT_MOBILE = '30px'
 /** 审批/提问提醒卡片元素标记（body 直接子级：fixed 顶部、z-index 9998、
  *  仅窄屏显示；IME 悬浮条 9999 优先。二者几乎不会同时出现——审批/提问
  *  pending 时 composer 被 takeover，无法打字）。 */
@@ -218,19 +182,6 @@ const FAB_ATTR = 'data-meow-smooth-fab'
 const HEADER_HIDDEN_ATTR = 'data-meow-smooth-header-hidden'
 
 const FOLD_CSS = `
-/* 过渡放基础态：折叠/展开双向都有动画。 */
-[data-composer-card] [data-input-scroll] { transition: max-height 150ms ease; }
-/* 折叠态：滚动窗压到目标行数（桌面 2 行 / 窄屏 1 行），mirror/backdrop/
-   textarea 结构不动。高度取 JS 实测的 N 行高（--meow-smooth-fold-height），
-   未测量时回退契约值：桌面 54px（2 行），窄屏（<1024）30px（1 行）。 */
-[data-composer-card][${FOLD_ATTR}="${FOLD_COLLAPSED}"] [data-input-scroll] {
-  max-height: var(--meow-smooth-fold-height, ${FOLDED_MAX_HEIGHT}) !important;
-}
-@media (max-width: 1023px) {
-  [data-composer-card][${FOLD_ATTR}="${FOLD_COLLAPSED}"] [data-input-scroll] {
-    max-height: var(--meow-smooth-fold-height, ${FOLDED_MAX_HEIGHT_MOBILE}) !important;
-  }
-}
 /* 输入法激活：隐藏原生 header（悬浮条独占顶部，避免重复与遮挡）。
    imeActive 在桌面恒为 false，属性永不设置，此规则不生效。 */
 html[${IME_ROOT_ATTR}] [data-slot="conversation.session.header"] > header {
@@ -293,25 +244,26 @@ html[${IME_ROOT_ATTR}] [data-slot="conversation.session.header"] > header {
   /* 模式选择（agent preset label）折叠：只留 icon（font-size:0 隐去
      文本节点，flex 布局下 icon 尺寸不受影响）。点击展开时由内联样式
      恢复（data-meow-smooth-mode-expanded，见 onModeLabelToggle）。 */
-  [data-slot="conversation.session.header.actions"] span[title] {
+  [data-slot="conversation.session.header.actions"] > span[title] {
     font-size: 0;
     max-width: 20px;
   }
-  /* 后台任务数按钮（job-list）缩窄：只留 StateDot 小图标，隐藏计数文字
+  /* 仅条目根的触发按钮缩窄，不命中下拉列表内的任务行。
+     后台任务数按钮（job-list）缩窄：只留 StateDot 小图标，隐藏计数文字
      与右侧下拉箭头；点小图标 = 点按钮本体 → 打开下拉列表。无运行中
      任务（无 dot）时用中性灰点兜底，按钮不消失、仍可点开列表。 */
-  [data-slot="conversation.session.header.actions"] button[aria-expanded]:not([aria-haspopup]) {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-expanded]:not([aria-haspopup]) {
     min-width: 0;
     padding: 4px 6px;
     gap: 0;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-expanded]:not([aria-haspopup]) > span {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-expanded]:not([aria-haspopup]) > span {
     display: none;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-expanded]:not([aria-haspopup]) > svg:not([data-state]) {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-expanded]:not([aria-haspopup]) > svg:not([data-state]) {
     display: none;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-expanded]:not([aria-haspopup]):not(:has(svg[data-state]))::before {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-expanded]:not([aria-haspopup]):not(:has(svg[data-state]))::before {
     content: '';
     flex: none;
     width: 6px;
@@ -322,18 +274,18 @@ html[${IME_ROOT_ATTR}] [data-slot="conversation.session.header"] > header {
   /* 子代理目录按钮（subagent-catalog）同样缩窄：只留 activitySlot 里的
      状态小图标；空闲（无运行中子代理）时 activitySlot 空置 → 中性灰点
      兜底。菜单开合逻辑在按钮本体 onClick，点图标即展开。 */
-  [data-slot="conversation.session.header.actions"] button[aria-haspopup="tree"] {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-haspopup="tree"] {
     min-width: 0;
     padding: 4px 6px;
     gap: 0;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-haspopup="tree"] > span:not(:first-child) {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-haspopup="tree"] > span:not(:first-child) {
     display: none;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-haspopup="tree"] > svg:not([data-state]) {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-haspopup="tree"] > svg:not([data-state]) {
     display: none;
   }
-  [data-slot="conversation.session.header.actions"] button[aria-haspopup="tree"]:not(:has(svg[data-state])) > span:first-child::before {
+  [data-slot="conversation.session.header.actions"] > * > button[aria-haspopup="tree"]:not(:has(svg[data-state])) > span:first-child::before {
     content: '';
     display: block;
     width: 6px;
@@ -630,78 +582,8 @@ html[${IME_ROOT_ATTR}] [${FAB_ATTR}] {
   }
 }
 
-/* 运行时发送按钮，外观复刻官方 primary；仅 AI 运行中渲染（空闲不显示），
-   点击等价于输入框按一次回车，按 busyEnter 设置执行插话发送或排队。 */
-[data-meow-run-send] {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border: none;
-  border-radius: 999px;
-  /* 外观复刻官方 primary 发送按钮：信息蓝底 + 白图标（官方 css 契约）。 */
-  background: var(--dsw-alias-button-info-fill);
-  color: #fff;
-  cursor: pointer;
-  transition: background-color 100ms ease;
-  /* 与官方 primary 相同的行内上移对齐。 */
-  transform: translateY(-2px);
-  /* 排到 .trailing 末尾，紧贴官方发送/停止按钮（中间不再隔 model/meter）。 */
-  order: 10;
-  padding: 0;
-  -webkit-user-select: none;
-  user-select: none;
-  touch-action: manipulation;
-}
-[data-meow-run-send]:hover:not(:disabled) {
-  background: var(--dsw-alias-button-info-hover);
-}
-[data-meow-run-send]:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-[data-meow-run-send] svg {
-  width: 16px;
-  height: 16px;
-}
 
-/* 手机端拍/选图按钮（仅 dsh ≤0.1.2：0.1.3-alpha.2 起官方自带 📎，探测到就
-   不渲染，见 photo-picker.tsx）。外观对齐官方输入栏那组图标按钮（.add 契约：
-   28px 圆形 + 透明底 + 次要色 + hover 浅底 + focus 描边）。 */
-[data-meow-photo-picker] {
-  display: grid;
-  place-items: center;
-  flex: none;
-  corner-shape: round;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  transition: background-color 100ms ease;
-  padding: 0;
-  -webkit-user-select: none;
-  user-select: none;
-  touch-action: manipulation;
-}
-[data-meow-photo-picker]:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-[data-meow-photo-picker]:focus-visible {
-  outline: 2px solid var(--dsw-alias-label-tertiary);
-  outline-offset: -2px;
-}
-[data-meow-photo-picker] svg {
-  width: 16px;
-  height: 16px;
-}
 `
-
-/** 每个滚动窗折叠前的 scrollTop（展开时恢复，防视口错位）。 */
-const scrollTops = new WeakMap<HTMLElement, number>()
 
 // ---- 输入框焦点链路诊断（2026-08-26 猫猫报"输入框卡住：点文字不出光标、
 // 能选择却无法删除修改"——PWA 无 console，环形轨迹 + 关键节点上报 host
@@ -775,7 +657,7 @@ function composerCardOf(target: EventTarget | null): HTMLElement | null {
 /** composer 输入区元素。dsh 0.1.5 起输入区是 Lexical 的 contenteditable
  *  （`ComposerContentEditable.tsx` 发出 `data-composer-input`），此前是
  *  textarea。凡是"这个事件/焦点是不是发生在输入区"的判定都必须走这里，
- *  否则新版下会静默失败——回车拦截、enterkeyhint、编辑流诊断、聚焦抑制、
+ *  否则新版下会静默失败——编辑流诊断、聚焦抑制、
  *  键盘遮挡修正会一起失效，且不报任何错。 */
 function composerEditableOf(target: EventTarget | null): HTMLElement | null {
   if (!(target instanceof HTMLElement)) return null
@@ -789,83 +671,6 @@ function composerEditableOf(target: EventTarget | null): HTMLElement | null {
 /** 可编辑元素的当前文本长度（textarea 读 value，contenteditable 读 textContent）。 */
 function editableLength(el: HTMLElement): number {
   return el instanceof HTMLTextAreaElement ? el.value.length : (el.textContent ?? '').length
-}
-
-/** 展开卡片（幂等）：移除折叠属性 + 恢复滚动位置 + 清除动态折叠行高
- *  （回到 CSS 变量默认，避免旧主题残留）。instant=true 时跳过 150ms
- *  过渡直接到位——聚焦路径专用：浏览器/iOS 的"聚焦上滚/键盘让位 pan"
- *  按【聚焦瞬间】的盒子几何判定是否滚动，过渡中的半高盒子会被判成
- *  "已可见"而放弃滚动，等长高后底部就压在键盘下（2026-08-26 猫猫报
- *  "重新展开有时被输入法遮挡"的根因之一）。瞬时展开让聚焦瞬间的几何
- *  = 终态几何，原生 reveal 判定必然正确。 */
-function expandCard(card: HTMLElement, instant = false): void {
-  if (card.getAttribute(FOLD_ATTR) !== FOLD_COLLAPSED) return
-  noteFold(`exp${instant ? '!' : ''}`)
-  card.removeAttribute(FOLD_ATTR)
-  card.style.removeProperty('--meow-smooth-fold-height')
-  const scroll = card.querySelector<HTMLElement>('[data-input-scroll]')
-  if (instant && scroll !== null) {
-    // 抑制本帧起的过渡：inline 覆盖 CSS transition，双 rAF 后恢复
-    // （rAF1=样式已提交，rAF2=下一帧起恢复正常动画节奏）。
-    scroll.style.transition = 'none'
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => { scroll.style.transition = '' })
-    })
-  }
-  if (scroll !== null) {
-    const saved = scrollTops.get(scroll)
-    if (saved !== undefined) {
-      scroll.scrollTop = saved
-      scrollTops.delete(scroll)
-    }
-  }
-}
-
-/** 当前折叠目标行数：窄屏（frame 宽 < 1024，dsh 布局契约断点，即手机/
- *  小窗）1 行，桌面 2 行。与功能⑤窄屏判定同源（frame 宽，非 window）；
- *  frame 未挂时退 window.innerWidth 兜底（首页等极早期场景）。 */
-function foldLines(): number {
-  const frame = frameElement()
-  const width = frame !== null
-    ? frame.getBoundingClientRect().width
-    : (typeof window !== 'undefined' ? window.innerWidth : SIDEBAR_AUTO_COLLAPSE)
-  return width < SIDEBAR_AUTO_COLLAPSE ? FOLD_LINES_MOBILE : FOLD_LINES_DESKTOP
-}
-
-/** 实测滚动窗 N 行内容高度（line-height × N + 上下 padding）。line-height
- *  为 'normal'（非 px）时按 font-size × 1.2 估算；全部失败回退 30px × N
- *  契约值。折叠高度与"N 行判定"共用此值，保证折叠后 = 真实默认高度。 */
-function foldedHeight(scroll: HTMLElement, lines: number): number {
-  const style = getComputedStyle(scroll)
-  const pt = parseFloat(style.paddingTop)
-  const pb = parseFloat(style.paddingBottom)
-  const pad = (Number.isFinite(pt) ? pt : 0) + (Number.isFinite(pb) ? pb : 0)
-  let line = parseFloat(style.lineHeight)
-  if (!(Number.isFinite(line) && line > 0)) {
-    const fs = parseFloat(style.fontSize)
-    line = Number.isFinite(fs) && fs > 0 ? Math.round(fs * 1.2) : 20
-  }
-  const total = line * lines + pad
-  return total > 0 ? total : 30 * lines
-}
-
-/** 折叠卡片到目标行数（桌面 2 行 / 窄屏 1 行，幂等）：保存 scrollTop、
- *  写入实测 N 行高变量、打折叠属性。草稿不足目标行数时跳过（折叠无视觉
- *  变化）。所有折叠入口（失焦 / 触屏点卡片外）共用，行为一致。 */
-function collapseCard(card: HTMLElement): void {
-  if (card.getAttribute(FOLD_ATTR) === FOLD_COLLAPSED) return
-  noteFold('cld')
-  const scroll = card.querySelector<HTMLElement>('[data-input-scroll]')
-  if (scroll === null) return
-  const h = foldedHeight(scroll, foldLines())
-  // 判定"不足 N 行"必须对比实测 N 行高而非 scroll.clientHeight（那是
-  // 被 mirror 撑高的当前多行高度——对比它会把所有无溢出草稿都当成
-  // "N 行"跳过折叠，正是折叠不稳定的根因）。
-  if (scroll.scrollHeight <= h + 1) return
-  scrollTops.set(scroll, scroll.scrollTop)
-  scroll.scrollTop = 0
-  card.style.setProperty('--meow-smooth-fold-height', `${h}px`)
-  card.setAttribute(FOLD_ATTR, FOLD_COLLAPSED)
 }
 
 /** 动态基线：无键盘态的 visualViewport 高度。screen.height 在分屏/折叠
@@ -1331,54 +1136,18 @@ function ensureComposerVisible(): void {
 }
 
 /** 键盘动画期间的重试调度：iOS 键盘 ~250ms 弹起，visualViewport 连续
- *  变化，展开过渡也要 150ms——单次修正在中间态会算错几何。180/380ms
- *  双采样基本覆盖"键盘就位+展开完成"的稳定点（幂等无害多打几次）。 */
+ *  变化，单次修正在中间态会算错几何。180/380ms 双采样覆盖键盘就位后的
+ *  稳定点（幂等无害多打几次）。 */
 function revealSoon(): void {
   window.setTimeout(ensureComposerVisible, 180)
   window.setTimeout(ensureComposerVisible, 380)
 }
 
-/** 焦点进入卡片：若处于折叠态则展开并恢复滚动位置。
- *  焦点已被抑制器撤走（activeElement 不再是 target）时不展开——会话
- *  切换的自动聚焦被拦截后，卡片应保持折叠态（无焦点=无输入意图）。 */
-function onFocusIn(event: FocusEvent): void {
-  const card = composerCardOf(event.target)
-  if (card === null) return
-  if (event.target !== document.activeElement) return
+/** 输入框聚焦后继续执行键盘遮挡可视性兜底；不改变输入框高度或内部滚动位置。 */
+function onComposerFocusIn(event: FocusEvent): void {
+  if (event.target !== document.activeElement || composerEditableOf(event.target) === null) return
   noteFold('fi', true)
-  expandCard(card)
-  revealSoon() // 键盘弹起/展开完成后的可视性兜底
-  // 触屏键盘的回车键显示为"换行"（配合需求 4：触屏 Enter 插入换行）。
-  // 注意：这里不再直接压缩 header——键盘是否弹起由 visualViewport
-  // 判定（imeActive），聚焦本身不是键盘信号（外接键盘/不自动弹键盘）。
-  // 新版输入区是 contenteditable（`data-composer-input`）；只挂在 textarea 上
-  // 会让触屏键盘的回车键显示成"发送"而不是"换行"。
-  card.querySelector<HTMLElement>('[data-composer-input], textarea')?.setAttribute('enterkeyhint', 'enter')
-}
-
-/** 焦点离开卡片：折叠到 1 行（保存 scrollTop）。重复监听时幂等。 */
-function onFocusOut(event: FocusEvent): void {
-  const card = composerCardOf(event.target)
-  if (card === null) return
-  // 焦点落在卡片内其他控件（模型选择等）不算离开。
-  if (composerCardOf(event.relatedTarget) === card) return
-  noteFold('fo', true)
-  collapseCard(card)
-  // 键盘收起由 visualViewport 恢复触发解除（imeActive），失焦本身不解除
-  // （iOS 键盘"完成"键收起时焦点可能仍在输入框）。
-}
-
-/** 触屏兜底折叠：点卡片外任意处 → 折叠。iOS/Android 点空白区域键盘收起
- *  但焦点可能不移走（focusout 不触发），这是失焦折叠的唯一漏网场景。
- *  用 click（pointerup 之后）而非 pointerdown：拖拽滚动不产生 click，
- *  不会误伤"滚动聊天记录"。桌面（精细指针）由 focusout 覆盖，不启用。 */
-function onDocumentClickCapture(event: MouseEvent): void {
-  if (!isCoarsePointer()) return
-  const target = event.target
-  if (!(target instanceof Element)) return
-  if (composerCardOf(target) !== null) return
-  const card = document.querySelector<HTMLElement>('[data-composer-card]')
-  if (card !== null) collapseCard(card)
+  revealSoon()
 }
 
 /** 模式图标点击：展开显示模式名（恢复内联 font-size/max-width 覆盖
@@ -1386,7 +1155,7 @@ function onDocumentClickCapture(event: MouseEvent): void {
 function onModeLabelToggle(event: MouseEvent): void {
   const target = event.target
   if (!(target instanceof Element)) return
-  const label = target.closest<HTMLElement>('[data-slot="conversation.session.header.actions"] span[title]')
+  const label = target.closest<HTMLElement>('[data-slot="conversation.session.header.actions"] > span[title]')
   if (label === null) return
   if (label.dataset.meowFoldModeExpanded === 'true') {
     delete label.dataset.meowFoldModeExpanded
@@ -1403,9 +1172,9 @@ function onModeLabelToggle(event: MouseEvent): void {
 function onModeLabelDismiss(event: MouseEvent): void {
   const target = event.target
   if (!(target instanceof Element)) return
-  if (target.closest('[data-slot="conversation.session.header.actions"] span[title]') !== null) return
+  if (target.closest('[data-slot="conversation.session.header.actions"] > span[title]') !== null) return
   for (const label of document.querySelectorAll<HTMLElement>(
-    '[data-slot="conversation.session.header.actions"] span[title][data-meow-smooth-mode-expanded="true"]',
+    '[data-slot="conversation.session.header.actions"] > span[title][data-meow-smooth-mode-expanded="true"]',
   )) {
     delete label.dataset.meowFoldModeExpanded
     label.style.fontSize = ''
@@ -1413,22 +1182,14 @@ function onModeLabelDismiss(event: MouseEvent): void {
   }
 }
 
-/** 点击卡片任意处兜底展开：聚焦态判定外的补强（手机点输入框区域即展开）。
- *  交互控件（按钮/选择器/菜单项）不抢焦点；非交互区域顺带聚焦 textarea。
- *  同时记录用户主动点击时间戳（syncIme 区分自动聚焦键盘用）。
- *
- *  展开必须瞬时（instant）：本 handler 之后紧跟 focus——浏览器/iOS 的
- *  聚焦上滚与键盘让位 pan 按聚焦瞬间的几何判定，过渡中的半高盒子会被
- *  判成"已可见"而放弃滚动（2026-08-26 猫猫报"重新展开有时被输入法遮挡"
- *  的主根因）。聚焦也不再 preventScroll：直接点 textarea 的原生路径
- *  （无 preventScroll）一直正常，这里对齐同一行为。 */
+/** 点击 composer 卡片：记录用户主动交互时间（syncIme 区分自动聚焦键盘），
+ *  并让卡片非交互区域仍可聚焦输入框。高度及内部滚动位置由宿主原生管理。 */
 function onPointerDownCapture(event: PointerEvent): void {
   const card = composerCardOf(event.target)
   if (card === null) return
   const tgt = event.target instanceof Element ? event.target : null
   noteFold(`pd ${tgt?.closest('textarea, [data-composer-input]') !== null ? 'ta' : 'card'}`, true)
   lastComposerPointer = Date.now()
-  expandCard(card, true)
   revealSoon()
   const target = event.target
   if (!(target instanceof Element)) return
@@ -1438,7 +1199,7 @@ function onPointerDownCapture(event: PointerEvent): void {
   if (editable !== null && composerEditableOf(editable) !== null) editable.focus()
 }
 
-/** 触屏（粗指针）判定：需求 4 只在手机/触屏设备生效，桌面键盘保持 Enter 发送。 */
+/** 触屏（粗指针）判定，供聚焦、折叠与手势增强使用。 */
 let coarseCache: boolean | undefined
 function isCoarsePointer(): boolean {
   if (coarseCache === undefined) {
@@ -1447,32 +1208,6 @@ function isCoarsePointer(): boolean {
       : false
   }
   return coarseCache
-}
-
-/** 触屏 Enter → 换行：capture 阶段只断官方发送路径（stopPropagation，
- *  React root 收不到 keydown → 官方 submit 不触发），默认行为留给浏览器
- *  原生插入换行（v5.3 重写，详见函数内注释）。
- *  Shift/Ctrl/Alt/Meta+Enter、IME 选词（isComposing/keyCode 229）放行。 */
-function onKeyDownCapture(event: KeyboardEvent): void {
-  if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return
-  if (event.isComposing || event.keyCode === 229) return
-  // 输入区判定见 composerEditableOf：新版是 Lexical contenteditable。
-  // 这里只 stopPropagation、不 preventDefault——浏览器原生换行会被 Lexical 的
-  // beforeinput 路径接住（insertParagraph → INSERT_PARAGRAPH_COMMAND →
-  // selection.insertLineBreak()），且不会触发挂在 KEY_ENTER_COMMAND 上的提交。
-  if (composerEditableOf(event.target) === null) return
-  if (!isCoarsePointer()) return
-  noteFold('keyEnter', true)
-  // 只断官方发送路径，把换行还给浏览器（2026-08-25 v5.3 重写，修"换行
-  // 丢失/跳回"）：旧实现 preventDefault + 手动改 DOM value + setSelectionRange
-  // + 派发合成 InputEvent——与本体受控层（textarea value={draft}）产生
-  // DOM/state 不一致窗口，commit 前任何其他重渲染都会用旧 draft 写回
-  // textarea（换行被抹掉="换不到"；晚一步覆盖="换到了又跳回"），且绕过
-  // 官方 beforeinput 编辑跟踪与 Safari 布局修复。实际只需 stopPropagation：
-  // 官方的 Enter→submit 挂在 React root 的 keydown 上，document capture
-  // 断传播即收不到、不会发送；不 preventDefault 则 WebKit 原生插入换行，
-  // beforeinput/input/onChange/mirror 全走原生节奏零竞争。
-  event.stopPropagation()
 }
 
 /** 禁止页面缩放：viewport meta 加 maximum-scale=1 + user-scalable=no
@@ -2331,7 +2066,8 @@ function installSheetForensics(): void {
   const origRemoveChild = Node.prototype.removeChild
   Node.prototype.removeChild = function <T extends Node>(this: Node, child: T): T {
     noteCall(child)
-    return origRemoveChild.call(this, child)
+    origRemoveChild.call(this, child)
+    return child
   }
   const mo = new MutationObserver((muts) => {
     for (const mut of muts) {
@@ -2392,7 +2128,7 @@ function installBugWatch(): void {
         document.querySelector('style[data-meow-fold-css]')?.remove()
         const style = document.createElement('style')
         style.dataset.meowFoldCss = 'true'
-        style.dataset.plugin = 'meow-smooth'
+        style.dataset.plugin = '@lolkda/meow-smooth'
         const epoch = ((w.__meowSheetEpoch as number | undefined) ?? 0) + 1
         w.__meowSheetEpoch = epoch
         w.__meowLiveSheetEpoch = epoch
@@ -2428,10 +2164,6 @@ function installBugWatch(): void {
 }
 
 /** 浏览器端插件体：注入 CSS + 事件委托 + 注册 composer.dock 隐形条目。 */
-// settingsScope 不进强制 inject：dsh 0.1.7 移除了该客户端服务，写进清单会让
-// 整个插件 pending（"waiting for service: settingsScope"）。官方纪律=只 inject
-// 必需服务，可选服务走 ctx 软取——下方 useBusyEnter 处已有 ctx.get('settingsScope')
-// 缺省回退（undefined → 组件按 queue 兜底）；0.1.6 上服务仍在，行为不变。
 export const inject = ['slots', 'layout', 'sessions', 'conversation']
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2452,6 +2184,13 @@ export function apply(ctx: any): void {
   // 同款协议：新实例入口先拆旧实例全部运行期资源，再安装自己。
   const w = window as unknown as Record<string, unknown>
   ;(w.__meowSmoothClientDispose as (() => void) | undefined)?.()
+  // 清理旧版 composer 高度折叠遗留；只触及专用属性，不改草稿或其他样式。
+  for (const card of document.querySelectorAll<HTMLElement>('[data-composer-card]')) {
+    if (card.getAttribute('data-meow-smooth') === 'collapsed') {
+      card.removeAttribute('data-meow-smooth')
+    }
+    card.style.removeProperty('--meow-smooth-fold-height')
+  }
   // 降级看门狗（放在一切早退之前）：无论 apply 走到哪个结局都保持运行，
   // bug 态（孤儿 FAB + 样式表丢失）在页面最底一行以纯文本现形。
   installBugWatch()
@@ -2494,7 +2233,7 @@ export function apply(ctx: any): void {
   // 0.1.6 模块加载器会认领页面全部无主 <style>（style:not([data-plugin])）
   // 划给"当前工厂"，该插件被热替换时连坐处决——本插件的样式表必须自带
   // data-plugin 标，认领扫描才会绕开（左下角鲸鱼按钮 bug 的根因，2026-09-20 法证实锤）。
-  style.dataset.plugin = 'meow-smooth'
+  style.dataset.plugin = '@lolkda/meow-smooth'
   // 样式表"代数"：每次注入自增并烙在元素上，删除法证据此判断被删的是
   // 当代还是上一代（上一代被删=热替换 dispose；当代被删=另有其人）。
   const sheetEpoch = ((w.__meowSheetEpoch as number | undefined) ?? 0) + 1
@@ -2519,42 +2258,30 @@ export function apply(ctx: any): void {
   // 电脑端禁止/缓解页面缩放（需求 15）：拦截 Ctrl 缩放手势/按键 +
   // 缩放偏离检测提示条（桌面浏览器缩放是浏览器级行为，JS 尽力而为）。
   disposers.push(lockDesktopZoom())
-  // 手机端设置页改造（需求 16）：全窗口面板 + 边栏图标竖列/滑出展开状态机。
-  disposers.push(installSettingsMobile())
+  // 手机端侧栏和设置使用单页导航，桌面保持宿主原布局。
+  const disposeSettings = installSettingsMobile()
+  const disposeSidebarMobile = installSidebarMobile(() => { gestureApi?.collapseToZero() })
+  disposers.push(disposeSettings, disposeSidebarMobile)
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => disposeSettings, 'meow-smooth: settings pages')
+    ctx.effect(() => disposeSidebarMobile, 'meow-smooth: sidebar page')
+  }
+  const disposeMobileHeader = installMobileHeader()
+  disposers.push(disposeMobileHeader)
+  // Host disposal and the existing client reload path may both run; this disposer is idempotent.
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => disposeMobileHeader, 'meow-smooth: mobile header')
+  }
 
-  // 失焦折叠（需求 1）：进出卡片判定 + 点击兜底展开 + 触屏 Enter 换行。
-  // 幂等：重复监听时各分支先查状态再动作。
-  document.addEventListener('focusin', onFocusIn)
   // 程序化聚焦抑制（需求⑳）：会话切换自动聚焦的 textarea 立即撤焦，
   // 键盘压根不弹（capture 阶段先于官方 unlock effect 的后续逻辑）。
   supTrace('registered')
   document.addEventListener('focusin', suppressFocusIn, { capture: true })
+  document.addEventListener('focusin', onComposerFocusIn)
   document.documentElement.dataset.meowApplyStage = 'suppressor-registered'
   applyLogPush(`#${applyN} ok suppressor-registered sheetEpoch=${sheetEpoch}`)
-  document.addEventListener('focusout', onFocusOut)
+  // 保留用户点击聚焦与触屏键盘可视性修正，不再改输入框高度或内部滚动位置。
   document.addEventListener('pointerdown', onPointerDownCapture, { capture: true })
-  document.addEventListener('keydown', onKeyDownCapture, { capture: true })
-  // 触屏兜底折叠：点卡片外任意处 → 折叠（iOS/Android 点空白可能不移焦，
-  // focusout 不触发；click 判定不会误伤滚动）。
-  document.addEventListener('click', onDocumentClickCapture, { capture: true })
-  // 跨断点重算折叠高度（桌面 2 行 ⇄ 窄屏 1 行）：已折叠的卡片在窗口跨过
-  // 1024 断点时重写实测变量（旋转/缩窗）；未折叠的下次折叠自然按新档算。
-  // 只在跨越断点那一次动作，普通 resize 零开销。
-  let foldWasWide = foldLines() === FOLD_LINES_DESKTOP
-  const onFoldBreakpoint = (): void => {
-    const wide = foldLines() === FOLD_LINES_DESKTOP
-    if (wide === foldWasWide) return
-    foldWasWide = wide
-    for (const card of document.querySelectorAll<HTMLElement>(
-      `[data-composer-card][${FOLD_ATTR}="${FOLD_COLLAPSED}"]`,
-    )) {
-      const scroll = card.querySelector<HTMLElement>('[data-input-scroll]')
-      if (scroll !== null) {
-        card.style.setProperty('--meow-smooth-fold-height', `${foldedHeight(scroll, foldLines())}px`)
-      }
-    }
-  }
-  window.addEventListener('resize', onFoldBreakpoint)
   // 输入框焦点链路诊断（2026-08-26 "输入框卡住"bug 排障）：input/
   // beforeinput/selectionchange 环形记录，随 disposers 拆除。
   disposers.push(installFoldDiagListeners())
@@ -2563,13 +2290,9 @@ export function apply(ctx: any): void {
   document.addEventListener('click', onModeLabelDismiss, { capture: true })
   document.addEventListener('click', onModeLabelToggle)
   disposers.push(() => {
-    document.removeEventListener('focusin', onFocusIn)
     document.removeEventListener('focusin', suppressFocusIn, { capture: true })
-    document.removeEventListener('focusout', onFocusOut)
+    document.removeEventListener('focusin', onComposerFocusIn)
     document.removeEventListener('pointerdown', onPointerDownCapture, { capture: true })
-    document.removeEventListener('keydown', onKeyDownCapture, { capture: true })
-    document.removeEventListener('click', onDocumentClickCapture, { capture: true })
-    document.removeEventListener('resize', onFoldBreakpoint)
     document.removeEventListener('click', onModeLabelDismiss, { capture: true })
     document.removeEventListener('click', onModeLabelToggle)
   })
@@ -2685,6 +2408,12 @@ export function apply(ctx: any): void {
   // 点按会触发 N 个实例的 handler——连点 N 次 toggle 就是开了又关。
   disposers.push(() => { sidebarFab().removeEventListener('click', onFabClick) })
   syncSidebarFurl()
+  // 标题入口复用手势模块的幂等打开，不另造侧栏状态。
+  const disposeTitleEntry = installTitleSidebarEntry(() => { gestureApi?.open() })
+  disposers.push(disposeTitleEntry)
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => disposeTitleEntry, 'meow-smooth: title sidebar entry')
+  }
   const sessions = ctx?.sessions as { open?: (sessionId: string) => void; refresh?: () => Promise<void> } | undefined
   // 手机端：侧边栏展开时点击右侧空间 → 自动收起（click 而非 pointerdown，
   // 见 onClickDismissSidebar 注释）。v6.3 起触摸 tap 由手势模块补位收起
@@ -2720,48 +2449,6 @@ export function apply(ctx: any): void {
       reportPending: reportLocalPending,
     }),
   }, FoldDock))
-  // 运行时发送按钮：登记到发送按钮旁的控件行，恒显示，运行时按 busyEnter 设置承担插话/排队，非运行等同回车发送。
-  // settingsScope 为可选服务，缺省时 useBusyEnter 回退 undefined（组件按 queue 兜底）。绑定在 apply 顶层执行一次：
-  // useSyncExternalStore 要求 subscribe 引用稳定，若放进 inject 回调每渲染重建会触发无限重渲染导致按钮消失。
-  const settingsScope = typeof ctx?.get === 'function' ? ctx.get('settingsScope') : undefined
-  const useBusyEnter = createBusyEnterHook(
-    settingsScope === undefined ? undefined : settingsScope.bind({ namespace: 'ui-conversation' }),
-  )
-  slots.inject('conversation.input.right', () => slots.register({
-    name: 'conversation.input.right',
-    id: 'meow-smooth-run-send',
-    order: 999,
-    inject: (sessionId: SessionId): {
-      submitMode: (mode: RunSendMode) => void
-      useBusyEnter: () => RunSendMode | undefined
-    } => {
-      // 服务缺失时降级为 no-op 提交而非抛错：inject 抛错会让 slot entry 崩溃（渲染边界吞掉并弃用该条目），按钮直接消失。
-      // 与 QueueDock 同构取 actx→conversation，但此处会话/服务偶发缺失不应让整个按钮消失，改为静默降级并告警。
-      const actx = ctx.sessions.scope(sessionId)
-      const conversation = actx?.get('conversation')
-      if (actx === undefined || conversation === undefined) {
-        console.warn(`[meow-smooth] run-send inject degraded for session "${sessionId}" (actx=${actx !== undefined}, conversation=${conversation !== undefined})`)
-        return {
-          submitMode: () => {},
-          useBusyEnter,
-        }
-      }
-      return {
-        submitMode: (mode: RunSendMode) => { conversation.input.for(actx).submit(mode) },
-        useBusyEnter,
-      }
-    },
-  }, RunSendButton))
-
-  // 手机端拍/选图（PR：手机发图）：输入栏右侧控件行加一个 📷，选图后合成
-  // drop 交给官方附件管线（与桌面拖图同一路径，零宿主改动）。order 998 落在
-  // 官方发送按钮（999）左侧；与 run-send 按钮同槽位互不干扰。
-  slots.inject('conversation.input.right', () => slots.register({
-    name: 'conversation.input.right',
-    id: 'meow-smooth-photo',
-    order: 998,
-  }, PhotoPickerButton))
-
   // 打包挂 window：下一次模块执行（热替换/rev 更新）在入口调用，拆除本
   // 实例全部运行期资源（见 apply 入口注释）。单项失败不阻断其余拆除。
   w.__meowSmoothClientDispose = (): void => {

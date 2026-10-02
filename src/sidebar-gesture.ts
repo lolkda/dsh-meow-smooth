@@ -126,7 +126,7 @@ export function installSidebarGesture(deps: GestureDeps): GestureApi {
   // 0.1.6 模块加载器认领无主 <style>（style:not([data-plugin])）划给当前
   // 工厂、其他插件热替换时连坐删除——必须自报家门（同 client.ts 主样式表，
   // 左下角鲸鱼按钮 bug 根因）。
-  style.setAttribute('data-plugin', 'meow-smooth')
+  style.setAttribute('data-plugin', '@lolkda/meow-smooth')
   style.textContent = GESTURE_CSS
   document.head.appendChild(style)
 

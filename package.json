@@ -1,11 +1,15 @@
 {
-  "name": "meow-smooth",
-  "version": "0.8.1",
+  "name": "@lolkda/meow-smooth",
+  "version": "0.8.2",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Phant0Meow/dsh-meow-smooth.git"
+    "url": "git+https://github.com/lolkda/dsh-meow-smooth.git"
   },
-  "description": "喵丝滑：dsh 前端行为增强——输入框失焦折叠高度 + 窄屏选中 Session 自动收起侧边栏（纯 client 插件，零 dsh 本体改动）",
+  "description": "喵丝滑独立维护分支：DSH 手机顶部、侧栏与设置页面适配，保留原生输入栏行为与通知增强",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh",

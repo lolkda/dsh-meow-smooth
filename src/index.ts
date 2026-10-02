@@ -53,7 +53,7 @@ import { installNotifyHost, sessionEventsOf } from './notify-host.ts'
 import { startCompressProxy, resolveTargetPort, detectOfficialGzip } from './compress-proxy.ts'
 import { connectionAuthOf, authGate } from './auth-gate.ts'
 
-/** 插件名（loader 诊断用；与 cordis.patch.yml 的 name 一致）。 */
+/** 插件显示名（Cordis 诊断用）；包加载身份由 cordis.patch.yml 的 name 指定。 */
 export const name = 'meow-smooth'
 
 /** host 半边功能版本标记（/pending 响应带出，客户端可探测运行实例的

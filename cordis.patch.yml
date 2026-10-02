@@ -4,6 +4,6 @@
 # installed code.
 - insert:
     - id: meow-smooth
-      name: 'meow-smooth'
+      name: '@lolkda/meow-smooth'
       config:
         enabled: true

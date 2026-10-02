@@ -1,281 +1,130 @@
-/**
- * meow-smooth — 手机端设置页改造模块（需求 16：窄屏设置面板可用化）。
- *
- * 零 dsh 本体改动，纯 client 侧：CSS 注入 + 事件委托 + 面板属性状态机。
- * 只作用于窄屏（< 1024px，dsh 布局断点 SIDEBAR_AUTO_COLLAPSE）；桌面宽屏
- * 不注入属性、不拦截点击，官方原样。
- *
- * 行为（仅窄屏）：
- *  1. 设置浮层全窗口显示（面板铺满 viewport，无上下左右空隙）。
- *  2. 左侧 sidebar 收成一竖列，宽度与 dsh 主界面边栏收起时一致（56px
- *     rail：36x36 控件 + 10px 侧边距），只显示图标。
- *  3. 右侧内容本就 flex:1 占满，无需改动。
- *  4. 点左侧边栏图标：不切换标签页，边栏宽度恢复（向右滑出动画），完整
- *     显示图标和文字标签。
- *  5. 边栏完整状态下点边栏按钮：正常切换标签页。
- *  6. 边栏完整状态下点右侧空间（非交互元素）：不切换标签页，边栏收回
- *     细细的版本。
- *  7. 边栏完整状态下切换标签页（点边栏按钮切换右侧分区）：切换完成后
- *     边栏自动折回细细的版本，不用再手动点空白收回。
- *
- * 状态机：挂在设置面板元素上的 data-meow-smooth-settings 属性
- *   absent    = 桌面/宽屏，官方原样；
- *   collapsed = 窄屏默认态：56px 图标竖列；
- *   expanded  = 窄屏展开态：188px 完整边栏。
- * 属性随面板挂载/卸载由 MutationObserver 重置（面板关闭重开必回默认），
- * 跨断点由 matchMedia 监听切换。
- */
-
-/** 设置面板状态属性（值：collapsed / expanded；缺席 = 桌面原样）。 */
-const SETTINGS_ATTR = 'data-meow-smooth-settings'
-/** 初始落位压制动画标记（面板刚插入时属性后置会触发 188→56 闪动动画）。 */
-const NOANIM_ATTR = 'data-meow-smooth-settings-noanim'
-/** 本模块注入的 <style> 标记（调试/排障用）。 */
-const STYLE_ATTR = 'data-meow-smooth-settings-css'
-/** 窄屏判定：与 dsh 布局断点 SIDEBAR_AUTO_COLLAPSE（1024）一致。 */
-const BREAKPOINT = '(max-width: 1023px)'
-
-/** 设置面板专用的移动端 CSS：全窗口 + 边栏收起/展开状态机。 */
-const SETTINGS_CSS = `
-/* 需求 16：手机端设置页改造。属性由 settings-mobile.ts 管理；桌面（宽屏）
-   无属性，以下全部不生效。 */
-@media (max-width: 1023px) {
-  /* 1. 浮层全窗口：面板铺满 overlay（fixed inset:0 的 flex 容器），
-     无上下左右空隙；圆角/阴影不再需要。 */
-  div[role="dialog"][${SETTINGS_ATTR}] {
+/** 手机设置单页导航：目录 → 分类内容 → 返回目录。宿主仍负责配置和关闭。 */
+const ATTR = 'data-meow-smooth-settings'
+const BACK = 'data-meow-settings-back'
+const PANEL = 'div[role="dialog"][data-shortcut-modal="settings"]'
+const CSS = `
+[${BACK}] { display: none; }
+@media (width < 768px) {
+  ${PANEL}[${ATTR}] {
+    position: fixed;
+    inset: 0;
+    display: block;
     width: 100% !important;
     height: 100% !important;
     max-width: none !important;
+    max-height: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
   }
-  /* 2/4. 边栏宽度动画（收起/展开共用一条 transition，双向平滑）。 */
-  div[role="dialog"][${SETTINGS_ATTR}] > nav {
-    transition: width 220ms cubic-bezier(0.2, 0.8, 0.3, 1),
-                padding 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  ${PANEL}[${ATTR}] > nav {
+    width: 100%; height: 100%; box-sizing: border-box; padding: 22px 16px 0;
+    border-right: 0;
   }
-  /* 标签的显示/隐藏动画：宽度与透明度联动（收起归零、展开滑出）。 */
-  div[role="dialog"][${SETTINGS_ATTR}] > nav > div > button > span {
-    transition: max-width 220ms cubic-bezier(0.2, 0.8, 0.3, 1),
-                opacity 150ms ease;
+  ${PANEL}[${ATTR}] > nav button { min-height: 44px; }
+  ${PANEL}[${ATTR}] > [class*="_content"] { width: 100%; height: 100%; min-width: 0; }
+  ${PANEL}[${ATTR}="detail"] > nav { display: none; }
+  /* 目录态仍复用右上角原生关闭按钮，其余内容不参与点击或无障碍导航。 */
+  ${PANEL}[${ATTR}="menu"] > [class*="_content"] {
+    position: absolute; inset: 0; pointer-events: none;
   }
-  /* 初始落位不播动画：面板刚插入时属性后置（MutationObserver 微任务晚于
-     元素首帧样式）会让浏览器把"188px 原生态 → 收起态"也当过渡来播，
-     打开瞬间闪一下。noanim 标记在首帧压制 transition，下一帧由 JS 摘除。 */
-  div[role="dialog"][${SETTINGS_ATTR}][${NOANIM_ATTR}] > nav,
-  div[role="dialog"][${SETTINGS_ATTR}][${NOANIM_ATTR}] > nav > div > button > span {
-    transition: none;
+  ${PANEL}[${ATTR}="menu"] > [class*="_content"] > [class*="_options"],
+  ${PANEL}[${ATTR}="menu"] > [class*="_content"] > [class*="_header"] > [class*="_actions"] { visibility: hidden; }
+  ${PANEL}[${ATTR}] > [class*="_content"] > [class*="_header"] {
+    padding-left: 16px; padding-right: 12px; min-height: 54px;
   }
-  /* 边栏右侧 1px 边线：引导用户识别"边栏 / 内容"两个区域。伪元素不占
-     布局宽度（border 会吃掉内容宽导致按钮 36px 溢出被压缩），随宽度
-     动画贴右缘移动。 */
-  div[role="dialog"][${SETTINGS_ATTR}] > nav {
-    position: relative;
+  ${PANEL}[${ATTR}] button[class*="_close"] { pointer-events: auto; min-width: 44px; min-height: 44px; }
+  ${PANEL}[${ATTR}="detail"] [${BACK}] {
+    display: inline-flex; align-items: center; flex-shrink: 0;
+    min-height: 44px; padding: 0 8px; border: 0; border-radius: 8px;
+    background: transparent; color: inherit; font: inherit; cursor: pointer;
   }
-  div[role="dialog"][${SETTINGS_ATTR}] > nav::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 1px;
-    background: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
-  }
-  /* 收起态（默认）：56px 图标竖列——与 dsh 主界面边栏收起宽度一致
-     （ui-sidebar rail：36x36 控件居中 + 10px 侧边距）。 */
-  div[role="dialog"][${SETTINGS_ATTR}="collapsed"] > nav {
-    width: 56px;
-    padding: 22px 10px 0;
-  }
-  /* 收起态标题：视觉隐藏但保留在无障碍树（dialog aria-labelledby 指向
-     它，display:none 会丢无障碍名）。 */
-  div[role="dialog"][${SETTINGS_ATTR}="collapsed"] > nav > div:first-child {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: 0;
-    padding: 0;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
-  /* 收起态按钮：36x36 圆钮（与主界面 rail 控件同形），只留图标居中。 */
-  div[role="dialog"][${SETTINGS_ATTR}="collapsed"] > nav > div > button {
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    gap: 0;
-    justify-content: center;
-    border-radius: 50%;
-  }
-  /* 收起态标签：宽度与透明度同时归零（展开时按 transition 反向动画）。 */
-  div[role="dialog"][${SETTINGS_ATTR}="collapsed"] > nav > div > button > span {
-    flex: 0;
-    max-width: 0;
-    opacity: 0;
-  }
-  /* 展开态：恢复官方 188px 完整边栏 + 图标文字。 */
-  div[role="dialog"][${SETTINGS_ATTR}="expanded"] > nav {
-    width: 188px;
-    padding: 22px 12px 0;
-  }
-  div[role="dialog"][${SETTINGS_ATTR}="expanded"] > nav > div > button > span {
-    flex: 1;
-    max-width: 200px;
-    opacity: 1;
-  }
+  ${PANEL}[${ATTR}="detail"] [${BACK}]:focus-visible { outline: 2px solid currentColor; }
 }
 `
 
-/** 窄屏媒体查询（install 时初始化；跨断点变化时重设面板状态）。 */
-let narrowQuery: MediaQueryList | null = null
-/** 当前设置面板元素（null = 未打开）。 */
-let panel: HTMLElement | null = null
+let activeDispose: (() => void) | null = null
 
-/**
- * 定位设置面板：官方 SettingsRoot 的 dialog 独有结构——`role="dialog"`
- * 的直接子级是 nav（Modal 系 dialog 直接子级是 content/footer，不命中）。
- */
-function findSettingsPanel(): HTMLElement | null {
-  const nav = document.querySelector('div[role="dialog"] > nav')
-  return nav !== null ? (nav.parentElement ?? null) : null
-}
-
-/** 按当前屏宽把面板状态机复位（宽屏 = 移除属性，官方原样）。 */
-function applyMode(): void {
-  if (panel === null) return
-  if (narrowQuery?.matches === true) {
-    panel.setAttribute(SETTINGS_ATTR, 'collapsed')
-  } else {
-    panel.removeAttribute(SETTINGS_ATTR)
-  }
-}
-
-/** 交互元素判定：展开态点这些元素不收回边栏（避免误收与布局抖动）。 */
-function isInteractive(target: Element): boolean {
-  return target.closest(
-    'button, a, input, select, textarea, label, [contenteditable="true"], '
-    + '[role="button"], [role="menuitem"], [role="menuitemcheckbox"], '
-    + '[role="menuitemradio"], [role="tab"], [role="switch"], [role="checkbox"], '
-    + '[role="radio"], [role="link"], [role="slider"]',
-  ) !== null
-}
-
-/**
- * 点击拦截（document capture，先于 React 根容器委托）：
- * 收起态点边栏按钮 → stopPropagation 让官方 onSelect 收不到 → 只展开；
- * 展开态点右侧空白 → 只收回，不切页。
- */
-function onSettingsClickCapture(event: MouseEvent): void {
-  const el = panel
-  if (el === null || narrowQuery?.matches !== true) return
-  const state = el.getAttribute(SETTINGS_ATTR)
-  if (state !== 'collapsed' && state !== 'expanded') return
-  const target = event.target
-  if (!(target instanceof Element) || !el.contains(target)) return
-  const nav = el.querySelector(':scope > nav')
-  const inNav = nav !== null && nav.contains(target)
-  if (state === 'collapsed') {
-    // 点边栏任意处（按钮或背景）→ 只展开，不切换标签页（capture 拦截在
-    // React 委托之前，stopPropagation 让官方 onSelect 收不到这次点击）。
-    if (inNav) {
-      event.preventDefault()
-      event.stopPropagation()
-      el.setAttribute(SETTINGS_ATTR, 'expanded')
-    }
-    return
-  }
-  // 展开态：点右侧非交互空间 → 收回细细的版本。
-  if (!inNav && !isInteractive(target)) {
-    event.preventDefault()
-    event.stopPropagation()
-    el.setAttribute(SETTINGS_ATTR, 'collapsed')
-  }
-}
-
-/** 面板挂载/卸载观察（打开即收起态；关闭/重开自动复位）。 */
-const panelObserver = new MutationObserver(() => {
-  const next = findSettingsPanel()
-  if (next === panel) return
-  const fresh = panel === null && next !== null
-  panel = next
-  if (fresh && narrowQuery?.matches === true) {
-    // 初始落位：直接钉到收起态并压制首帧动画（见 NOANIM_ATTR CSS）。
-    // 下一帧摘除标记，之后的收起/展开照常播动画。
-    next.setAttribute(SETTINGS_ATTR, 'collapsed')
-    next.setAttribute(NOANIM_ATTR, 'true')
-    requestAnimationFrame(() => { next.removeAttribute(NOANIM_ATTR) })
-  } else {
-    applyMode()
-  }
-})
-
-/**
- * 标签页切换自动折叠观察（需求 16 补充）：展开态下切了设置分区就折回。
- * 切换信号 = 左侧 nav 按钮的 aria-current 标记移动——官方用它在按钮间
- * 标记当前激活分区（e2e 亦以它断言切页），且与右侧分区内容渲染同属
- * React commit，marker 动 = 右侧区域标签页确实已切换。此时直接折回，
- * 用户无需再手动点空白。
- *
- * 为何选 aria-current 而不是"点完按钮延时收起"：
- *  - 点击当前已激活分区（aria-current 不动）属于"没切换"，边栏应保持；
- *  - 收起态点按钮只展开不切页（capture 拦截），同样不触发；
- *  - marker 变化是切页完成的确定性落点，不依赖切页耗时与定时器猜时机。
- */
-const tabObserver = new MutationObserver((records) => {
-  if (panel === null || narrowQuery?.matches !== true) return
-  if (panel.getAttribute(SETTINGS_ATTR) !== 'expanded') return
-  const nav = panel.querySelector(':scope > nav')
-  if (nav === null) return
-  for (const record of records) {
-    // 只认 nav 内的 aria-current 变化（右侧内容区或页面其它元素的同名
-    // 属性变化不理会）；任一条命中即切页完成 → 折叠。
-    if (record.attributeName === 'aria-current' && nav.contains(record.target)) {
-      panel.setAttribute(SETTINGS_ATTR, 'collapsed')
-      return
-    }
-  }
-})
-
-/**
- * 安装手机端设置页改造（client.ts apply 调用）。返回拆除函数（样式/
- * matchMedia/面板观察者/点击拦截）——client.ts 单实例拆除协议登记用，
- * 模块热替换时旧实例资源随协议整体清理，不再堆积。
- */
+/** 不搬移 React 节点：仅注入返回按钮和面板状态属性，卸载时全部回收。 */
 export function installSettingsMobile(): () => void {
-  // 先移除上一份同标记样式（热替换重装时避免 <head> 无限堆积副本）。
-  document.querySelector('style[data-meow-smooth-settings-css]')?.remove()
-  const style = document.createElement('style')
-  style.dataset.meowSettingsCss = 'true'
-  // 0.1.6 模块加载器认领无主 <style> 并在其他插件热替换时连坐删除——必须
-  // 自报家门（同 client.ts 主样式表，左下角鲸鱼按钮 bug 根因）。
-  style.dataset.plugin = 'meow-smooth'
-  style.textContent = SETTINGS_CSS
-  document.head.appendChild(style)
+  activeDispose?.()
+  const sheet = document.createElement('style')
+  sheet.setAttribute('data-meow-settings-css', 'true')
+  sheet.setAttribute('data-plugin', '@lolkda/meow-smooth')
+  sheet.textContent = CSS
+  document.head.appendChild(sheet)
+  const media = window.matchMedia('(width < 768px)')
+  let panel: HTMLElement | null = null
+  let back: HTMLButtonElement | null = null
+  let lastCategory: HTMLButtonElement | null = null
+  let disposed = false
 
-  const mq = window.matchMedia(BREAKPOINT)
-  narrowQuery = mq
-  const onNarrowChange = (): void => { applyMode() }
-  mq.addEventListener('change', onNarrowChange)
-  panelObserver.observe(document.body, { subtree: true, childList: true })
-  // 标签页切换折叠观察：全文档监听 aria-current（nav 动态挂载，无法直接
-  // 挂在 nav 上），回调内按"target 是否在 nav 内"过滤，见 tabObserver。
-  tabObserver.observe(document.body, {
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['aria-current'],
-  })
-  document.addEventListener('click', onSettingsClickCapture, { capture: true })
-
-  // 初始扫描：插件在设置面板已打开时热重载的兜底。
-  panel = findSettingsPanel()
-  applyMode()
-
-  return (): void => {
-    style.remove()
-    mq.removeEventListener('change', onNarrowChange)
-    panelObserver.disconnect()
-    tabObserver.disconnect()
-    document.removeEventListener('click', onSettingsClickCapture, { capture: true })
+  const releasePanel = (): void => {
+    panel?.removeAttribute(ATTR)
+    back?.remove()
+    back = null
+    lastCategory = null
   }
+  const ensureBack = (): void => {
+    if (back?.isConnected) return
+    const header = panel?.querySelector(':scope > [class*="_content"] > [class*="_header"]')
+    if (!header) return
+    back = document.createElement('button')
+    back.type = 'button'
+    back.setAttribute(BACK, 'true')
+    back.setAttribute('aria-label', '返回设置目录')
+    back.textContent = '‹ 返回设置'
+    header.prepend(back)
+  }
+  const applyMode = (): void => {
+    if (!panel) return
+    if (media.matches) {
+      ensureBack()
+      panel.setAttribute(ATTR, 'menu')
+    } else {
+      panel.removeAttribute(ATTR)
+    }
+  }
+  const syncPanel = (): void => {
+    const next = document.querySelector<HTMLElement>(`${PANEL}:has(> nav)`)
+    if (next !== panel) {
+      releasePanel()
+      panel = next
+      applyMode()
+    } else if (panel && media.matches) {
+      ensureBack()
+    }
+  }
+  const onClick = (event: MouseEvent): void => {
+    if (!panel || !media.matches || !(event.target instanceof Element)) return
+    const button = event.target.closest('button')
+    if (!button || !panel.contains(button)) return
+    if (button === back) {
+      panel.setAttribute(ATTR, 'menu')
+      const focus = lastCategory?.isConnected ? lastCategory : panel.querySelector<HTMLButtonElement>('nav [aria-current="true"]')
+      focus?.focus({ preventScroll: true })
+    } else if (panel.querySelector(':scope > nav')?.contains(button)) {
+      // document 冒泡阶段已让宿主 onSelect 处理，同一分类也能重新进入内容页。
+      lastCategory = button
+      panel.setAttribute(ATTR, 'detail')
+      queueMicrotask(() => { if (!disposed && media.matches && panel?.getAttribute(ATTR) === 'detail') back?.focus({ preventScroll: true }) })
+    }
+  }
+  const observer = new MutationObserver(syncPanel)
+  observer.observe(document.body, { childList: true, subtree: true })
+  document.addEventListener('click', onClick)
+  media.addEventListener('change', applyMode)
+  syncPanel()
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
+    observer.disconnect()
+    document.removeEventListener('click', onClick)
+    media.removeEventListener('change', applyMode)
+    releasePanel()
+    panel = null
+    sheet.remove()
+    if (activeDispose === dispose) activeDispose = null
+  }
+  activeDispose = dispose
+  return dispose
 }

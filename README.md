@@ -1,5 +1,27 @@
 # dsh-meow-smooth 喵丝滑——手机端远程使用dsh，躺着coding，刷b站coding
 
+> 本仓库是 [Phant0Meow/dsh-meow-smooth](https://github.com/Phant0Meow/dsh-meow-smooth) 的独立维护分支，保留原 MIT 许可与署名。npm 包为 **`@lolkda/meow-smooth`**，不覆盖上游 `meow-smooth`。当前分支的手机适配差异见 [手机适配说明](./MOBILE-HEADER.md)；下方功能介绍主要保留上游文档，发生冲突时以分支说明为准。
+
+## 本分支构建与发布
+
+要求 Node.js 24、npm 11.19.0。克隆后执行：
+
+```sh
+npm ci
+npm run typecheck
+npm run build
+node --test scripts/verify-package.test.mjs
+node scripts/verify-package.mjs
+```
+
+GitHub Actions 的 `publish.yml` 在 `main` 推送、PR 和手动运行时只构建、检查并上传 npm 压缩包；只有 `v<package.json version>` 标签才发布到 npm。版本标签与包版本不一致、构建/类型检查/包内容检查失败时不得发布。
+
+新 npm 包需先由维护者 `npm login --auth-type=web` 并交互首发，再为 `@lolkda/meow-smooth` 配置 trusted publisher：GitHub owner **`lolkda`**、repository **`dsh-meow-smooth`**、workflow **`publish.yml`**，不填 environment，明确允许直接 `npm publish`。后续工作流通过 GitHub OIDC 发布，**不设置 `NPM_TOKEN` 或 `NODE_AUTH_TOKEN`**，公开仓库与公开包可自动产生 provenance。每次发布需使用尚未发布的新版本；普通分支推送不会发布。
+
+配置方法与限制参见 [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)。
+
+---
+
 dsh（DeepSeek Harness）前端体验增强插件，**零 dsh 本体改动**，纯客户端自包含。
 装上之后，dsh 在手机上像原生 App 一样好摸，在电脑上也有更舒服的小细节。
 
@@ -64,13 +86,13 @@ dsh 的大会话在手机上看很慢——历史记录一次要拉好几 MB 的
 **从 GitHub 安装**：源码在 `src/`，`lib/` 不入仓库，安装时 npm 会触发 `prepare` 脚本现场构建，装完即用。
 
 ```powershell
-dsh plugin --profile web add github:Phant0Meow/dsh-meow-smooth
+dsh plugin --profile web add github:lolkda/dsh-meow-smooth
 ```
 
 **从 npm 安装**：包内已含构建产物 `lib/index.js` 与 `lib/client.js`，安装时不再构建。
 
 ```powershell
-dsh plugin --profile web add meow-smooth
+dsh plugin --profile web add @lolkda/meow-smooth
 ```
 
 两种方式装完都会自动挂载，重启 DSH web 后启用，无需手工编辑任何组合文件。
@@ -80,7 +102,7 @@ dsh plugin --profile web add meow-smooth
 ## 卸载
 
 ```powershell
-dsh plugin --profile web remove meow-smooth
+dsh plugin --profile web remove @lolkda/meow-smooth
 ```
 
 彻底移除，重启 DSH web 后不再加载。
@@ -108,7 +130,7 @@ dsh plugin --profile web remove meow-smooth
 
 `scripts/feishu-relay.mjs` 是一个零依赖的转发进程——接收插件发出的 Bark 形状报文，构造成飞书 interactive 卡片（按事件类型配色：待审批橙、待回答蓝、完成绿、失败红、启动青），签名后投递到群机器人的 webhook。
 
-> **先把脚本放到你自己的目录。** 下面的命令假定你就在一个含 `scripts/` 的目录里。若你是从 npm 或 `dsh plugin add github:…` 安装的，文件在 `<profile>/node_modules/meow-smooth/scripts/` 下——请先把 `feishu-relay.mjs` 与 `feishu-relay.config.example.json` 复制到一个你自有的稳定目录再运行。脚本把配置与日志都写在**它自己所在的目录**，直接在 `node_modules` 里跑的话，重装一次就全丢了。
+> **先把脚本放到你自己的目录。** 下面的命令假定你就在一个含 `scripts/` 的目录里。若你是从 npm 或 `dsh plugin add github:…` 安装的，文件在 `<profile>/node_modules/@lolkda/meow-smooth/scripts/` 下——请先把 `feishu-relay.mjs` 与 `feishu-relay.config.example.json` 复制到一个你自有的稳定目录再运行。脚本把配置与日志都写在**它自己所在的目录**，直接在 `node_modules` 里跑的话，重装一次就全丢了。
 
 1. 复制配置样例，填入群机器人的 webhook 地址（`secret` 只在飞书侧开了「签名校验」时才需要）：
 
@@ -202,7 +224,7 @@ tailscale serve --bg --https=8443 http://127.0.0.1:8444
 > - Tailscale Serve 的 HTTPS 同时提供 `wss://` 升级与 PWA/Web Push 所需的安全上下文。
 > - 若改用 Caddy / nginx 等反向代理，同样需要让 DSH 信任代理暴露的权威（`--trusted-host`）。
 > - 局域网直连同理：把网关/反代对外权威加入 `--trusted-host`。
-> - 安装时请保持插件原名 `meow-smooth`（改名安装会导致前端注册 id 不匹配，页面报「Failed to load plugins」）。
+> - 本分支安装名为 `@lolkda/meow-smooth`，客户端 ModuleLoader id 随包名构建；内部 Cordis 条目 id 与业务路由保留 `meow-smooth`。不要再给安装包取其他别名，也不要同时启用上游和本分支。
 
 已验证环境：DSH 0.1.5-rc.1 · meow-smooth 0.7.1 · Tailscale 1.102.3（Windows PC + Android 手机）；DSH 0.1.1-rc.2 · meow-smooth 0.6.1 · Tailscale 1.102.3（Windows PC + Android 15 平板）。
 

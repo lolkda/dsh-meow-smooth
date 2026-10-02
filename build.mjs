@@ -8,19 +8,18 @@
  *    shell's client module loader; see @deepseek-ai/dsh-client-modules).
  *
  * Everything is bundled (esbuild) so the plugin is self-contained:
- * @deepseek-ai/* imports are linked in at build time via the node_modules
- * junction mirrors (scripts/link-workspace.ps1); react stays external on the
- * client side (shell singleton, ModuleLoader resolves it).
+ * Runtime dependencies are declared in package.json; react stays external on
+ * the client side (shell singleton, ModuleLoader resolves it).
  */
 import { build, context } from 'esbuild';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+
+const { name: packageName } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 
 const watch = process.argv.includes('--watch');
 
-// The @deepseek-ai/* packages live in the dsh-meow pnpm workspace, not in this
-// package's node_modules. `node_modules/@deepseek-ai` holds junction mirrors
-// (created by scripts/link-workspace.ps1) so esbuild can resolve both this
-// plugin's direct imports and the transitive imports of bundled packages.
+// Resolve dependencies from this package's own locked installation.
 const nodePaths = [fileURLToPath(new URL('./node_modules', import.meta.url))];
 
 const hostOptions = {
@@ -55,7 +54,7 @@ const clientOptions = {
   banner: {
     js: [
       'window.__ModuleLoader__.load({',
-      '  id: "meow-smooth",',
+      `  id: ${JSON.stringify(packageName)},`,
       '  factory: (require) => {',
       '    var module = { exports: {} };',
       '    var exports = module.exports;',

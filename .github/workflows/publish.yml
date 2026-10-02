@@ -74,6 +74,6 @@ jobs:
       - name: Publish the verified tarball with OIDC
         shell: bash
         run: |
-          tarballs=(dist/*.tgz)
+          tarballs=(./dist/*.tgz)
           [[ ${#tarballs[@]} -eq 1 && -f "${tarballs[0]}" ]]
           npm publish "${tarballs[0]}" --ignore-scripts --access public --registry=https://registry.npmjs.org

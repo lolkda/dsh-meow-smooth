@@ -27,6 +27,8 @@ jobs:
         run: npm ci
       - name: Check types
         run: npm run typecheck
+      - name: Test sidebar navigation
+        run: npm run test:sidebar-mobile
       - name: Test package verifier offline
         run: node --test scripts/verify-package.test.mjs
       - name: Build package
